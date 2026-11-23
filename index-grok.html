@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Customer Pins</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--bg:#f6f6f3;--card:#fff;--ink:#1c1c1a;--mute:#6b6b66;--line:#e2e2dc;--acc:#0f766e;
+padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root{--bg:#121211;--card:#1b1b19;--ink:#ecece8;--mute:#9a9a93;--line:#2c2c29;--acc:#2dd4bf;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:14px}
+h1{font-size:20px;margin:4px 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input,textarea{flex:1;min-width:0;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:16px}
+textarea{width:100%;min-height:90px;margin-top:8px;font:16px monospace}
+button{padding:10px 14px;border-radius:10px;border:0;background:var(--acc);color:#fff;font-size:15px;font-weight:600}
+@media (prefers-color-scheme:dark){button:not(.ghost){color:#04201d}}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button.sm{padding:6px 10px;font-size:13px}
+.mute{color:var(--mute);font-size:13px}
+#map{height:340px;border-radius:10px;border:1px solid var(--line);z-index:0}
+.item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-top:1px solid var(--line)}
+.item:first-child{border-top:0}
+.item.hl{background:color-mix(in srgb,var(--acc) 12%,transparent)}
+.item .info{flex:1;min-width:0;cursor:pointer}
+.item a{color:var(--acc);text-decoration:none;font-weight:600;font-size:13px}
+.n{font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.done .n{color:var(--mute);text-decoration:line-through}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+</style>
+</head>
+<body>
+<main>
+<h1>Customer Pins</h1>
+
+<div class="card" id="login" style="display:none">
+  <div class="mute" id="loginmsg" style="margin-bottom:8px">Enter the team password.</div>
+  <div class="row"><input id="pw" type="password" placeholder="Team password"><button id="go">Open</button></div>
+</div>
+
+<div id="app" style="display:none">
+<div class="card">
+  <div class="row"><button id="live">Start live location</button><button class="ghost" id="stop" style="display:none">Stop</button><button class="ghost sm" id="fit">Fit all</button></div>
+  <div class="mute" id="status" style="margin-top:8px">Location is off.</div>
+  <div class="mute" id="sync" style="margin-top:6px">Syncing…</div>
+  <div class="row" style="margin-top:8px"><input id="by" placeholder="Your name (shown as pinned by)"><button class="ghost sm" id="refresh">Refresh</button></div>
+</div>
+
+<div class="card">
+  <div class="row"><input id="name" placeholder="Customer name"><button id="pin">Pin here</button></div>
+  <div class="row" style="margin-top:8px"><input id="ll" placeholder="Or paste lat, lng"><button class="ghost" id="addll">Add</button></div>
+</div>
+
+<div class="card">
+  <div id="map"></div>
+  <div class="mute" style="margin-top:8px"><span class="dot" style="background:#2563eb"></span>You &nbsp; <span class="dot" style="background:#dc2626"></span>To visit &nbsp; <span class="dot" style="background:#16a34a"></span>Visited</div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between"><b id="count">0 customers</b><button class="ghost sm" id="copy">Copy CSV</button></div>
+  <input id="search" placeholder="Search customers" style="width:100%;margin-top:8px;flex:none">
+  <div id="list" style="margin-top:6px"></div>
+  <details style="margin-top:10px"><summary class="mute">Import list</summary>
+    <textarea id="imp" placeholder="One per line: name, lat, lng (optional 4th: visited)"></textarea>
+    <div class="row" style="margin-top:6px"><button class="sm" id="doimp">Import</button><span class="mute" id="impmsg"></span></div>
+  </details>
+</div>
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// === PASTE YOUR APPS SCRIPT WEB APP URL BETWEEN THE QUOTES ===
+var API = 'PASTE_WEB_APP_URL_HERE';
+
+var $ = function (i) { return document.getElementById(i); };
+function ls(k, v) { try { if (v === undefined) return localStorage.getItem(k) || ''; localStorage.setItem(k, v); } catch (e) {} return ''; }
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+var pw = ls('pw'), pins = [], me = null, watchId = null, sel = null, fitted = false, map = null, layer = null, meDot = null, meAcc = null;
+
+function dist(a, b) {
+  var R = 6371000, r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lng - a.lng) * r;
+  var x = Math.sin(dl / 2) * Math.sin(dl / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) * Math.sin(dn / 2);
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function fmt(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
+function setSync(t) { $('sync').textContent = t; }
+
+// ---- API ----
+function apiGet() { return fetch(API + '?key=' + encodeURIComponent(pw)).then(function (r) { return r.json(); }); }
+function apiPost(o) { o.key = pw; return fetch(API, { method: 'POST', body: JSON.stringify(o) }).then(function (r) { return r.json(); }); }
+
+function showLogin(msg) {
+  $('login').style.display = ''; $('app').style.display = 'none';
+  if (msg) $('loginmsg').textContent = msg;
+}
+function showApp() {
+  $('login').style.display = 'none'; $('app').style.display = '';
+  initMap(); setTimeout(function () { if (map) map.invalidateSize(); }, 50);
+}
+
+function load() {
+  if (API.indexOf('PASTE_') === 0) { setSync('Setup not finished: add the Web App URL in index.html.'); return Promise.resolve(); }
+  setSync('Syncing…');
+  return apiGet().then(function (d) {
+    if (d.error) { pw = ''; ls('pw', ''); showLogin('Wrong password. Try again.'); return; }
+    pins = d.rows || [];
+    setSync('Synced · ' + pins.length + ' customers · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    render();
+    if (!fitted && pins.length) { fitAll(); fitted = true; }
+  }).catch(function () { setSync('Cannot reach the sheet. Check your connection and tap Refresh.'); });
+}
+
+// ---- Map ----
+function initMap() {
+  if (map || typeof L === 'undefined') return;
+  map = L.map('map', { zoomControl: true }).setView([0, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+  layer = L.layerGroup().addTo(map);
+}
+function fitAll() {
+  if (!map) return;
+  var pts = pins.map(function (p) { return [p.lat, p.lng]; });
+  if (me) pts.push([me.lat, me.lng]);
+  if (!pts.length) return;
+  if (pts.length === 1) map.setView(pts[0], 16); else map.fitBounds(pts, { padding: [30, 30], maxZoom: 17 });
+}
+function drawMap() {
+  if (!map) return;
+  layer.clearLayers();
+  pins.forEach(function (p) {
+    L.circleMarker([p.lat, p.lng], { radius: p.row === sel ? 13 : 9, color: '#fff', weight: 2, fillColor: p.visited ? '#16a34a' : '#dc2626', fillOpacity: 1 })
+      .bindTooltip(p.name).on('click', function () { sel = p.row; render(); }).addTo(layer);
+  });
+}
+function drawMe() {
+  if (!map || !me) return;
+  if (!meDot) { meAcc = L.circle([me.lat, me.lng], { radius: me.acc, color: '#2563eb', weight: 1, fillOpacity: 0.12 }).addTo(map); meDot = L.circleMarker([me.lat, me.lng], { radius: 8, color: '#fff', weight: 2, fillColor: '#2563eb', fillOpacity: 1 }).addTo(map); }
+  else { meDot.setLatLng([me.lat, me.lng]); meAcc.setLatLng([me.lat, me.lng]); meAcc.setRadius(me.acc); }
+}
+
+// ---- Render list ----
+function render() {
+  var vd = pins.filter(function (p) { return p.visited; }).length;
+  $('count').textContent = pins.length + (pins.length === 1 ? ' customer' : ' customers') + ' · ' + vd + ' visited';
+  var q = $('search').value.trim().toLowerCase();
+  var list = pins.filter(function (p) { return !q || p.name.toLowerCase().indexOf(q) > -1; });
+  if (me) list = list.slice().sort(function (a, b) { return dist(me, a) - dist(me, b); });
+  var L_ = $('list'); L_.innerHTML = '';
+  list.forEach(function (p) {
+    var d = me ? ' · ' + fmt(dist(me, p)) : '';
+    var el = document.createElement('div');
+    el.className = 'item' + (p.row === sel ? ' hl' : '') + (p.visited ? ' done' : '');
+    el.innerHTML = '<div class="info" data-f="' + p.row + '"><div class="n">' + esc(p.name) + '</div><div class="mute">' + p.lat.toFixed(5) + ', ' + p.lng.toFixed(5) + d + (p.by ? ' · by ' + esc(p.by) : '') + '</div></div>' +
+      '<div class="row" style="flex-wrap:nowrap"><a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=' + p.lat + ',' + p.lng + '">Navigate</a>' +
+      '<button class="ghost sm" data-v="' + p.row + '">' + (p.visited ? 'Undo' : 'Visited') + '</button><button class="ghost sm" data-d="' + p.row + '">Delete</button></div>';
+    L_.appendChild(el);
+  });
+  drawMap(); drawMe();
+}
+$('list').onclick = function (e) {
+  var t = e.target, row;
+  if ((row = t.getAttribute('data-v'))) {
+    var p = pins.filter(function (x) { return String(x.row) === row; })[0]; if (!p) return;
+    p.visited = !p.visited; render();
+    apiPost({ action: 'visited', row: p.row, visited: p.visited }).catch(function () { setSync('Could not save. Tap Refresh.'); });
+  } else if ((row = t.getAttribute('data-d'))) {
+    var q = pins.filter(function (x) { return String(x.row) === row; })[0]; if (!q) return;
+    if (!confirm('Delete ' + q.name + '?')) return;
+    pins = pins.filter(function (x) { return x !== q; }); render();
+    apiPost({ action: 'delete', row: q.row }).catch(function () { setSync('Could not delete. Tap Refresh.'); });
+  } else {
+    var info = t.closest('.info');
+    if (info) { sel = Number(info.getAttribute('data-f')); var s = pins.filter(function (x) { return x.row === sel; })[0]; render(); if (s && map) map.setView([s.lat, s.lng], 17); }
+  }
+};
+$('search').oninput = render;
+
+// ---- Adding ----
+function who() { return $('by').value.trim() || 'team'; }
+function addPins(list) {
+  list.forEach(function (p) { p.by = who(); });
+  setSync('Saving…');
+  return apiPost({ action: 'add', pins: list }).then(function (d) {
+    if (d.error) { setSync('Not saved: ' + d.error); return; }
+    return load();
+  }).catch(function () { setSync('Could not save. Check connection.'); });
+}
+$('pin').onclick = function () {
+  var n = $('name').value.trim();
+  if (!me) { $('status').textContent = 'Start live location first.'; return; }
+  if (!n) { $('name').focus(); return; }
+  addPins([{ name: n, lat: me.lat, lng: me.lng }]); $('name').value = '';
+};
+$('addll').onclick = function () {
+  var m = $('ll').value.match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) { $('ll').focus(); return; }
+  addPins([{ name: $('name').value.trim() || 'Customer ' + (pins.length + 1), lat: +m[1], lng: +m[2] }]);
+  $('ll').value = ''; $('name').value = '';
+};
+$('doimp').onclick = function () {
+  var list = [];
+  $('imp').value.split(/\r?\n/).forEach(function (l) {
+    var m = l.match(/^\s*"?(.*?)"?\s*[,;\t]\s*(-?\d+(?:\.\d+)?)\s*[,;\t ]\s*(-?\d+(?:\.\d+)?)\s*(?:[,;\t]\s*(\w+))?\s*$/);
+    if (m && m[1]) list.push({ name: m[1], lat: +m[2], lng: +m[3], visited: /^(visited|1|true|yes)$/i.test(m[4] || '') });
+  });
+  $('impmsg').textContent = list.length ? 'Importing ' + list.length + '…' : 'No valid lines found';
+  if (list.length) addPins(list).then(function () { $('imp').value = ''; $('impmsg').textContent = 'Imported ' + list.length; });
+};
+$('copy').onclick = function () {
+  var t = 'name,lat,lng,visited\n' + pins.map(function (p) { return '"' + p.name.replace(/"/g, '""') + '",' + p.lat + ',' + p.lng + ',' + (p.visited ? 'visited' : ''); }).join('\n');
+  try { navigator.clipboard.writeText(t).then(function () { $('copy').textContent = 'Copied'; }, function () { $('copy').textContent = 'Blocked'; }); } catch (e) { $('copy').textContent = 'Blocked'; }
+  setTimeout(function () { $('copy').textContent = 'Copy CSV'; }, 1500);
+};
+
+// ---- Live location ----
+$('live').onclick = function () {
+  if (!navigator.geolocation) { $('status').textContent = 'Location is not supported on this browser.'; return; }
+  $('status').textContent = 'Finding you…';
+  watchId = navigator.geolocation.watchPosition(function (p) {
+    me = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
+    $('status').textContent = 'Live: ' + me.lat.toFixed(5) + ', ' + me.lng.toFixed(5) + ' (±' + Math.round(me.acc) + ' m)';
+    $('live').style.display = 'none'; $('stop').style.display = '';
+    var first = !meDot; drawMe(); if (first && !pins.length && map) map.setView([me.lat, me.lng], 16);
+    render();
+  }, function (e) {
+    $('status').textContent = 'Could not get location (' + e.message + '). Allow location for this site in your browser settings.';
+  }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+};
+$('stop').onclick = function () {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null; me = null;
+  if (meDot) { map.removeLayer(meDot); map.removeLayer(meAcc); meDot = meAcc = null; }
+  $('stop').style.display = 'none'; $('live').style.display = ''; $('status').textContent = 'Location is off.'; render();
+};
+$('fit').onclick = fitAll;
+$('refresh').onclick = load;
+
+// ---- Start ----
+$('by').value = ls('by');
+$('by').onchange = function () { ls('by', $('by').value); };
+$('go').onclick = function () {
+  var v = $('pw').value; if (!v) return;
+  pw = v; ls('pw', v); showApp(); load();
+};
+$('pw').onkeydown = function (e) { if (e.key === 'Enter') $('go').click(); };
+if (pw) { showApp(); load(); } else { showLogin(); }
+setInterval(function () { if (!document.hidden && pw && $('app').style.display !== 'none') load(); }, 45000);
+</script>
+</body>
+</html>
